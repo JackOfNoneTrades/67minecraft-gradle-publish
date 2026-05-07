@@ -6,6 +6,8 @@ import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
+val sixtySevenUnimixinsProjectId = "kzM9rC6D"
+
 data class SixtySevenDependency(
       val dependencyType: String,
       val projectId: String? = null,
@@ -194,8 +196,11 @@ val publish67Minecraft = tasks.register("publish67Minecraft") {
 
               val dependencies = parseRelations(prop("67minecraftRelations"))
               val usesMixins = prop("usesMixins")?.equals("true", ignoreCase = true) == true
-              if (usesMixins && dependencies.none { it.projectId == "unimixins" || it.versionId == "unimixins" }) {
-                      dependencies += SixtySevenDependency("required", projectId = "unimixins")
+
+              if (usesMixins) {
+                    if (dependencies.none { it.projectId == sixtySevenUnimixinsProjectId }) {
+                            dependencies += SixtySevenDependency("required", projectId = sixtySevenUnimixinsProjectId)
+                    }
               }
 
               val dependencyJson = dependencies.map {
