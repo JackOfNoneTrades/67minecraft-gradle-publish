@@ -5,8 +5,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.net.URI
 
 val sixtySevenUnimixinsProjectId = "kzM9rC6D"
+gradle.startParameter.isConfigurationCacheRequested = false
 
 data class SixtySevenDependency(
       val dependencyType: String,
@@ -132,7 +134,7 @@ fun uploadVersion(
       artifact: File,
 ) {
       val boundary = "----67minecraft-${UUID.randomUUID()}"
-      val connection = URL("${apiBase.trimEnd('/')}/version").openConnection() as HttpURLConnection
+      val connection = URI("${apiBase.trimEnd('/')}/version").toURL().openConnection() as HttpURLConnection
 
       connection.requestMethod = "POST"
       connection.doOutput = true
