@@ -14,9 +14,6 @@ val forced67MinecraftVersion = providers.gradleProperty("67minecraftVersionNumbe
 	.orNull
 	?.trim()
 	?.takeIf { it.isNotEmpty() }
-
-gradle.startParameter.isConfigurationCacheRequested = false
-
 if (forced67MinecraftVersion != null) {
 	project.version = forced67MinecraftVersion
 	extensions.extraProperties.set("modVersion", forced67MinecraftVersion)
