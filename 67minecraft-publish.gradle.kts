@@ -6,6 +6,7 @@ import org.gradle.api.tasks.bundling.AbstractArchiveTask
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
+import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
@@ -45,6 +46,24 @@ fun splitList(value: String?): List<String> =
 
 fun boolProp(name: String, default: Boolean): Boolean =
 	prop(name)?.equals("true", ignoreCase = true) ?: default
+
+fun boolEnv(name: String, default: Boolean): Boolean =
+	env(name)?.equals("true", ignoreCase = true) ?: default
+
+fun githubRefType(): String? =
+	env("GITHUB_REF_TYPE") ?: env("GITHUB_REF")?.substringAfter("refs/", "")?.substringBefore("/")
+
+fun shouldPublishOnCurrentRef(): Boolean {
+	if (!boolEnv("GITHUB_ACTIONS", false)) {
+		return true
+	}
+
+	if (githubRefType()?.equals("tag", ignoreCase = true) == true) {
+		return true
+	}
+
+	return boolProp("67minecraftAllowNonTagPublish", false)
+}
 
 fun jsonString(value: String): String =
 	buildString {
@@ -216,6 +235,82 @@ fun writeText(out: java.io.OutputStream, value: String) {
 	out.write(value.toByteArray(StandardCharsets.UTF_8))
 }
 
+fun encodePathSegment(value: String): String =
+	URLEncoder.encode(value, StandardCharsets.UTF_8.name()).replace("+", "%20")
+
+fun unescapeJsonString(value: String): String =
+	buildString {
+		var index = 0
+		while (index < value.length) {
+			val char = value[index]
+			if (char != '\\' || index + 1 >= value.length) {
+				append(char)
+				index++
+				continue
+			}
+
+			when (val escaped = value[index + 1]) {
+				'"', '\\', '/' -> append(escaped)
+				'b' -> append('\b')
+				'f' -> append('\u000c')
+				'n' -> append('\n')
+				'r' -> append('\r')
+				't' -> append('\t')
+				'u' -> {
+					val hex = value.substring(index + 2, index + 6)
+					append(hex.toInt(16).toChar())
+					index += 4
+				}
+				else -> append(escaped)
+			}
+
+			index += 2
+		}
+	}
+
+fun jsonStringField(json: String, field: String): String? {
+	val match = Regex("\"${Regex.escape(field)}\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"").find(json)
+		?: return null
+
+	return unescapeJsonString(match.groupValues[1])
+}
+
+fun resolveProjectId(apiBase: String, reference: String): String {
+	val connection = URI("${apiBase.trimEnd('/')}/project/${encodePathSegment(reference)}")
+		.toURL()
+		.openConnection() as HttpURLConnection
+
+	connection.requestMethod = "GET"
+	connection.setRequestProperty("User-Agent", "67minecraft-gradle-publish")
+	connection.setRequestProperty("Accept", "application/json")
+
+	val code = connection.responseCode
+	val response = (if (code in 200..299) connection.inputStream else connection.errorStream)
+		?.bufferedReader()
+		?.readText()
+		.orEmpty()
+
+	if (code !in 200..299) {
+		throw GradleException("Failed to resolve 67minecraft project reference '$reference' with HTTP $code:\n$response")
+	}
+
+	val id = jsonStringField(response, "id")
+		?: throw GradleException("Failed to resolve 67minecraft project reference '$reference': response did not include an id.")
+
+	if (id != reference) {
+		println("Resolved 67minecraft project reference '$reference' to '$id'.")
+	}
+
+	return id
+}
+
+fun inferredVersionType(versionNumber: String): String =
+	prop("67minecraftVersionType") ?: when {
+		boolEnv("SNAPSHOT", false) || versionNumber.endsWith("-snapshot", ignoreCase = true) -> "beta"
+		versionNumber.endsWith("-pre", ignoreCase = true) -> "beta"
+		else -> "release"
+	}
+
 fun uploadVersion(
 	apiBase: String,
 	token: String,
@@ -271,6 +366,14 @@ val publish67Minecraft = tasks.register("publish67Minecraft") {
 	notCompatibleWithConfigurationCache("Uploads files from a remote script using project state at execution time.")
 
 	doLast {
+		if (!shouldPublishOnCurrentRef()) {
+			println(
+				"Skipping 67minecraft publish on GitHub ref type '${githubRefType() ?: "unknown"}'. " +
+					"Set -P67minecraftAllowNonTagPublish=true to override.",
+			)
+			return@doLast
+		}
+
 		val projectId = prop("67minecraftProjectId")
 			?: throw GradleException("Missing gradle.properties value: 67minecraftProjectId")
 		val token = env("SIX_SEVEN_TOKEN")
@@ -303,10 +406,14 @@ val publish67Minecraft = tasks.register("publish67Minecraft") {
 			dependencies += SixtySevenDependency("required", projectId = sixtySevenUnimixinsProjectId)
 		}
 
+		val resolvedProjectIds = mutableMapOf<String, String>()
+		fun resolvedProjectId(reference: String): String =
+			resolvedProjectIds.getOrPut(reference) { resolveProjectId(apiBase, reference) }
+
 		val dependencyJson = dependencies.map {
 			buildMap<String, Any> {
 				put("dependency_type", it.dependencyType)
-				it.projectId?.let { projectId -> put("project_id", projectId) }
+				it.projectId?.let { projectId -> put("project_id", resolvedProjectId(projectId)) }
 				it.versionId?.let { versionId -> put("version_id", versionId) }
 			}
 		}
@@ -326,7 +433,7 @@ val publish67Minecraft = tasks.register("publish67Minecraft") {
 			"version_body" to readChangelog(versionNumber),
 			"dependencies" to dependencyJson,
 			"game_versions" to gameVersions,
-			"version_type" to (prop("67minecraftVersionType") ?: "release"),
+			"version_type" to inferredVersionType(versionNumber),
 			"loaders" to loaders,
 			"featured" to false,
 			"status" to (prop("67minecraftStatus") ?: "listed"),
