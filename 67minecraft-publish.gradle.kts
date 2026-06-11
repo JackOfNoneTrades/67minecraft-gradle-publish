@@ -10,7 +10,9 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
-val sixtySevenUnimixinsProjectId = "kzM9rC6D"
+val legacySixtySevenUnimixinsProjectId = "kzM9rC6D"
+val sixtySevenUnimixinsModrinthProjectId = "ghjoiQAl"
+val sixtySevenUnimixinsModrinthSlug = "unimixins"
 val forced67MinecraftVersion = providers.gradleProperty("67minecraftVersionNumber")
 	.orNull
 	?.trim()
@@ -24,11 +26,27 @@ data class SixtySevenDependency(
 	val dependencyType: String,
 	val projectId: String? = null,
 	val versionId: String? = null,
+	val externalSource: String? = null,
+	val externalId: String? = null,
+	val externalSlug: String? = null,
+	val externalName: String? = null,
+	val externalUrl: String? = null,
+	val externalIconUrl: String? = null,
+	val externalResolveReference: String? = null,
 )
 
 data class SixtySevenUploadFile(
 	val partName: String,
 	val file: File,
+)
+
+data class SixtySevenExternalProject(
+	val source: String,
+	val id: String,
+	val slug: String?,
+	val name: String?,
+	val url: String?,
+	val iconUrl: String?,
 )
 
 fun prop(name: String): String? =
@@ -94,6 +112,104 @@ fun jsonValue(value: Any?): String =
 		else -> jsonString(value.toString())
 	}
 
+fun normalizeExternalSource(source: String): String =
+	when (source.lowercase()) {
+		"modrinth" -> "modrinth"
+		"curse", "curseforge" -> "curseforge"
+		"github" -> "github"
+		"maven" -> "maven"
+		else -> throw GradleException("Invalid 67minecraft external dependency platform: $source")
+	}
+
+fun invalidRelation(relation: String): Nothing =
+	throw GradleException("Invalid 67minecraftRelations entry: $relation")
+
+fun externalProjectDependency(scope: String, target: String, relation: String): SixtySevenDependency {
+	val targetAndPlatform = target.split("@", limit = 2)
+	if (targetAndPlatform.size == 1) {
+		return SixtySevenDependency(scope, projectId = target)
+	}
+
+	val displayName = targetAndPlatform[0].trim()
+	val platformParts = targetAndPlatform[1]
+		.split(":")
+		.map { it.trim() }
+
+	if (displayName.isEmpty() || platformParts.isEmpty() || platformParts[0].isEmpty()) {
+		invalidRelation(relation)
+	}
+
+	val source = normalizeExternalSource(platformParts[0])
+	val platformArgs = platformParts.drop(1)
+
+	return when (source) {
+		"modrinth", "curseforge" -> {
+			val resolveReference = when {
+				platformArgs.isEmpty() -> displayName
+				platformArgs.all { it.isNotEmpty() } -> platformArgs.joinToString(":")
+				else -> invalidRelation(relation)
+			}
+
+			SixtySevenDependency(
+				dependencyType = scope,
+				externalSource = source,
+				externalName = displayName,
+				externalResolveReference = resolveReference,
+			)
+		}
+		"github" -> {
+			val repository = when {
+				platformArgs.size >= 2 && platformArgs[0].isNotEmpty() && platformArgs[1].isNotEmpty() ->
+					"${platformArgs[0]}/${platformArgs[1]}"
+				platformArgs.size == 1 && "/" in platformArgs[0] -> platformArgs[0]
+				platformArgs.isEmpty() && "/" in displayName -> displayName
+				else -> invalidRelation(relation)
+			}
+
+			SixtySevenDependency(
+				dependencyType = scope,
+				externalSource = source,
+				externalId = repository,
+				externalName = displayName,
+				externalUrl = "https://github.com/$repository",
+			)
+		}
+		"maven" -> {
+			val coordinates = when {
+				platformArgs.size >= 2 && platformArgs.all { it.isNotEmpty() } -> platformArgs.joinToString(":")
+				platformArgs.isEmpty() && ":" in displayName -> displayName
+				else -> invalidRelation(relation)
+			}
+
+			SixtySevenDependency(
+				dependencyType = scope,
+				externalSource = source,
+				externalId = coordinates,
+				externalName = displayName,
+			)
+		}
+		else -> throw GradleException("Unsupported 67minecraft external dependency platform: $source")
+	}
+}
+
+fun isUnimixinsDependency(dependency: SixtySevenDependency): Boolean {
+	if (dependency.projectId == legacySixtySevenUnimixinsProjectId) {
+		return true
+	}
+
+	if (dependency.externalSource != "modrinth") {
+		return false
+	}
+
+	return listOf(
+		dependency.externalId,
+		dependency.externalSlug,
+		dependency.externalResolveReference,
+	)
+		.filterNotNull()
+		.any { it == sixtySevenUnimixinsModrinthProjectId || it.equals(sixtySevenUnimixinsModrinthSlug, ignoreCase = true) }
+}
+
 fun parseRelations(raw: String?): MutableList<SixtySevenDependency> {
 	val dependencies = mutableListOf<SixtySevenDependency>()
 
@@ -109,17 +225,26 @@ fun parseRelations(raw: String?): MutableList<SixtySevenDependency> {
 				throw GradleException("Invalid 67minecraftRelations entry: $relation")
 			}
 
-			val scope = scopeAndRest[0]
-			val kind = kindAndId[0]
-			val id = kindAndId[1]
+			val scope = scopeAndRest[0].trim()
+			val kind = kindAndId[0].trim()
+			val id = kindAndId[1].trim()
+
+			if (id.isEmpty()) {
+				invalidRelation(relation)
+			}
 
 			if (scope !in setOf("required", "optional", "incompatible", "embedded")) {
 				throw GradleException("Invalid 67minecraft relation scope: $scope")
 			}
 
 			dependencies += when (kind) {
-				"project" -> SixtySevenDependency(scope, projectId = id)
-				"version" -> SixtySevenDependency(scope, versionId = id)
+				"project" -> externalProjectDependency(scope, id, relation)
+				"version" -> {
+					if ("@" in id) {
+						throw GradleException("External 67minecraft dependencies must use project relations: $relation")
+					}
+					SixtySevenDependency(scope, versionId = id)
+				}
 				else -> throw GradleException("Invalid 67minecraft relation kind: $kind")
 			}
 		}
@@ -304,6 +429,55 @@ fun resolveProjectId(apiBase: String, reference: String): String {
 	return id
 }
 
+fun externalResolverApiBase(apiBase: String): String =
+	Regex("/api/v\\d+$").replace(apiBase.trimEnd('/'), "/api/v3")
+
+fun resolveExternalProject(apiBase: String, source: String, reference: String): SixtySevenExternalProject {
+	val resolverBase = externalResolverApiBase(apiBase)
+	val connection = URI(
+		"${resolverBase}/external_project/${encodePathSegment(source)}/${encodePathSegment(reference)}",
+	)
+		.toURL()
+		.openConnection() as HttpURLConnection
+
+	connection.requestMethod = "GET"
+	connection.setRequestProperty("User-Agent", "67minecraft-gradle-publish")
+	connection.setRequestProperty("Accept", "application/json")
+
+	val code = connection.responseCode
+	val response = (if (code in 200..299) connection.inputStream else connection.errorStream)
+		?.bufferedReader()
+		?.readText()
+		.orEmpty()
+
+	if (code !in 200..299) {
+		throw GradleException(
+			"Failed to resolve external 67minecraft dependency '$source:$reference' with HTTP $code:\n$response",
+		)
+	}
+
+	val id = jsonStringField(response, "id")
+		?: throw GradleException(
+			"Failed to resolve external 67minecraft dependency '$source:$reference': response did not include an id.",
+		)
+	val resolvedSource = jsonStringField(response, "source")?.let { normalizeExternalSource(it) } ?: source
+	val slug = jsonStringField(response, "slug")
+	val name = jsonStringField(response, "name")
+	val url = jsonStringField(response, "url")
+	val iconUrl = jsonStringField(response, "icon_url")
+
+	println("Resolved external 67minecraft dependency '$source:$reference' to '$resolvedSource:$id'.")
+
+	return SixtySevenExternalProject(
+		source = resolvedSource,
+		id = id,
+		slug = slug,
+		name = name,
+		url = url,
+		iconUrl = iconUrl,
+	)
+}
+
 fun inferredVersionType(versionNumber: String): String =
 	prop("67minecraftVersionType") ?: when {
 		boolEnv("SNAPSHOT", false) || versionNumber.endsWith("-snapshot", ignoreCase = true) -> "beta"
@@ -402,19 +576,46 @@ val publish67Minecraft = tasks.register("publish67Minecraft") {
 		val dependencies = parseRelations(prop("67minecraftRelations"))
 		val usesMixins = prop("usesMixins")?.equals("true", ignoreCase = true) == true
 
-		if (usesMixins && dependencies.none { it.projectId == sixtySevenUnimixinsProjectId }) {
-			dependencies += SixtySevenDependency("required", projectId = sixtySevenUnimixinsProjectId)
+		if (usesMixins && dependencies.none(::isUnimixinsDependency)) {
+			dependencies += SixtySevenDependency(
+				dependencyType = "required",
+				externalSource = "modrinth",
+				externalName = "UniMixins",
+				externalResolveReference = sixtySevenUnimixinsModrinthSlug,
+			)
 		}
 
 		val resolvedProjectIds = mutableMapOf<String, String>()
 		fun resolvedProjectId(reference: String): String =
 			resolvedProjectIds.getOrPut(reference) { resolveProjectId(apiBase, reference) }
 
+		val resolvedExternalProjects = mutableMapOf<String, SixtySevenExternalProject>()
+		fun resolvedExternalProject(source: String, reference: String): SixtySevenExternalProject =
+			resolvedExternalProjects.getOrPut("$source:$reference") {
+				resolveExternalProject(apiBase, source, reference)
+			}
+
 		val dependencyJson = dependencies.map {
 			buildMap<String, Any> {
 				put("dependency_type", it.dependencyType)
 				it.projectId?.let { projectId -> put("project_id", resolvedProjectId(projectId)) }
 				it.versionId?.let { versionId -> put("version_id", versionId) }
+				it.externalSource?.let { source ->
+					val resolved = it.externalResolveReference?.let { reference ->
+						resolvedExternalProject(source, reference)
+					}
+					val externalId = resolved?.id ?: it.externalId
+						?: throw GradleException("External 67minecraft dependency is missing an id.")
+
+					put("external_source", resolved?.source ?: source)
+					put("external_id", externalId)
+					(resolved?.slug ?: it.externalSlug)?.let { slug -> put("external_slug", slug) }
+					(resolved?.name ?: it.externalName)?.let { name -> put("external_name", name) }
+					(resolved?.url ?: it.externalUrl)?.let { url -> put("external_url", url) }
+					(resolved?.iconUrl ?: it.externalIconUrl)?.let { iconUrl ->
+						put("external_icon_url", iconUrl)
+					}
+				}
 			}
 		}
 
