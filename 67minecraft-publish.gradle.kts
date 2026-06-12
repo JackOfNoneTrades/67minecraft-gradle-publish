@@ -651,8 +651,10 @@ val publish67Minecraft = tasks.register("publish67Minecraft") {
 
 afterEvaluate {
 	publish67Minecraft.configure {
+		val explicitFile = prop("67minecraftFile")
 		val explicitTask = prop("67minecraftArtifactTask")
 		when {
+			explicitFile != null -> Unit
 			explicitTask != null -> dependsOn(explicitTask)
 			tasks.findByName("build") != null -> dependsOn("build")
 			else -> dependsOn(selectedArtifactTaskName())
